@@ -28,7 +28,7 @@ load_dotenv()
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.WARNING
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,8 @@ ENTER_FIRST_NAME, ENTER_LAST_NAME, SELECT_GROUP = range(3)
 SELECT_STUDENT, ENTER_GRADE = range(3, 5)
 EXPORT_SELECT_TABLE, EXPORT_SELECT_FORMAT = range(5, 7)
 BROADCAST_MESSAGE = range(7, 8)
-ASSIGN_REPRESENTATIVE = range(8, 9)
+ASSIGN_REPRESENTATIVE, ASSIGN_DEPUTY = range(8, 10)
+CLASS_REPRESENTATIVE_MENU, ADMIN_MENU = range(10, 12)
 
 connection_pool = SimpleConnectionPool(1, 20,
     host=DB_HOST,
@@ -74,29 +75,40 @@ def main_menu():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def class_representative_main_menu():
+    keyboard = [
+        ['📋 Меню старосты'],
+        ['📅 Расписание', '📝 Аттестация']
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def admin_main_menu():
+    keyboard = [
+        ['⚙️ Админ-меню'],
+        ['📅 Расписание', '📝 Аттестация']
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def combined_main_menu():
+    keyboard = [
+        ['📋 Меню старосты', '⚙️ Админ-меню'],
+        ['📅 Расписание', '📝 Аттестация']
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 def class_representative_menu():
     keyboard = [
-        ['📅 Расписание', '📝 Аттестация'],
         ['📨 Объяснительные', '📝 Выставить аттестацию'],
-        ['📢 Рассылка сообщения']
+        ['📢 Рассылка сообщения'],
+        ['👥 Назначить заместителя', '🔙 Главное меню']
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def admin_menu():
     keyboard = [
-        ['📅 Расписание', '📝 Аттестация'],
         ['👤 Назначить старосту', '🗑 Удалить пользователей'],
-        ['💾 Резервное копирование', '📤 Экспорт данных']
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-def combined_menu():
-    keyboard = [
-        ['📅 Расписание', '📝 Аттестация'],
-        ['📨 Объяснительные', '📝 Выставить аттестацию'],
-        ['📢 Рассылка сообщения'],
-        ['👤 Назначить старосту', '🗑 Удалить пользователей'],
-        ['💾 Резервное копирование', '📤 Экспорт данных']
+        ['💾 Резервное копирование', '📤 Экспорт данных'],
+        ['🔙 Главное меню']
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -107,16 +119,18 @@ def get_user_menu(telegram_id):
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM class_representatives WHERE telegram_id = %s", (telegram_id,))
         is_representative = cursor.fetchone() is not None
+        cursor.execute("SELECT 1 FROM deputy_class_representatives WHERE telegram_id = %s", (telegram_id,))
+        is_deputy = cursor.fetchone() is not None
     finally:
         cursor.close()
         release_connection(conn)
 
-    if is_admin and is_representative:
-        return combined_menu()
+    if is_admin and (is_representative or is_deputy):
+        return combined_main_menu()
     elif is_admin:
-        return admin_menu()
-    elif is_representative:
-        return class_representative_menu()
+        return admin_main_menu()
+    elif is_representative or is_deputy:
+        return class_representative_main_menu()
     else:
         return main_menu()
 
@@ -230,6 +244,11 @@ async def select_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=menu
                 )
                 return ConversationHandler.END
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Ошибка при регистрации студента: {e}", exc_info=True)
+                await update.message.reply_text('Произошла ошибка при регистрации.')
+                return ConversationHandler.END
         else:
             await update.message.reply_text(
                 'Группа не найдена. Пожалуйста, выберите группу из списка или нажмите "Назад".'
@@ -256,6 +275,9 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_representative_id'):
         await handle_assign_representative(update, context)
         return
+    if context.user_data.get('awaiting_deputy_id'):
+        await handle_assign_deputy(update, context)
+        return
     if context.user_data.get('awaiting_explanation'):
         await handle_explanation(update, context)
         return
@@ -268,6 +290,8 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM class_representatives WHERE telegram_id = %s", (telegram_id,))
         is_representative = cursor.fetchone() is not None
+        cursor.execute("SELECT 1 FROM deputy_class_representatives WHERE telegram_id = %s", (telegram_id,))
+        is_deputy = cursor.fetchone() is not None
     finally:
         cursor.close()
         release_connection(conn)
@@ -281,16 +305,30 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             'Вы в главном меню.', reply_markup=menu
         )
+    elif text == '📋 Меню старосты' and (is_representative or is_deputy):
+        reply_markup = class_representative_menu()
+        await update.message.reply_text('Выберите действие из меню старосты:', reply_markup=reply_markup)
+    elif text == '⚙️ Админ-меню' and is_admin:
+        reply_markup = admin_menu()
+        await update.message.reply_text('Выберите действие из админ-меню:', reply_markup=reply_markup)
+    elif text == '🔙 Главное меню':
+        menu = get_user_menu(telegram_id)
+        await update.message.reply_text(
+            'Вы вернулись в главное меню.', reply_markup=menu
+        )
     elif text in ['Сегодня', 'Завтра', 'На неделю']:
         await show_schedule(update, context)
-    elif is_representative and text == '📨 Объяснительные':
+    elif (is_representative or is_deputy) and text == '📨 Объяснительные':
         await view_explanations(update, context)
-    elif is_representative and text == '📝 Выставить аттестацию':
+    elif (is_representative or is_deputy) and text == '📝 Выставить аттестацию':
         await set_attestation(update, context)
         return SELECT_STUDENT
-    elif is_representative and text == '📢 Рассылка сообщения':
+    elif (is_representative or is_deputy) and text == '📢 Рассылка сообщения':
         await broadcast_message(update, context)
         return BROADCAST_MESSAGE
+    elif is_representative and text == '👥 Назначить заместителя':
+        await assign_deputy(update, context)
+        return ASSIGN_DEPUTY
     elif is_admin and text == '👤 Назначить старосту':
         await assign_representative(update, context)
         return ASSIGN_REPRESENTATIVE
@@ -307,6 +345,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'Пожалуйста, выберите действие из меню.',
             reply_markup=menu
         )
+
 async def schedule_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         ['Сегодня', 'Завтра'],
@@ -446,7 +485,7 @@ async def schedule_daily_notifications(application):
         day_of_week = today.strftime('%A')
         week_type = get_week_type_for_db(today)
 
-        logger.info(f"Планирование уведомлений на {today} ({day_of_week}), неделя {week_type}")
+        logger.warning(f"Планирование уведомлений на {today} ({day_of_week}), неделя {week_type}")
 
         cursor.execute("""
             SELECT s.group_id, s.subject_id, s.start_time, s.class_type
@@ -466,16 +505,16 @@ async def schedule_daily_notifications(application):
                     trigger=DateTrigger(run_date=notification_time),
                     args=[application, group_id, subject_id, start_time, class_type]
                 )
-                logger.info(f"Запланировано уведомление для группы {group_id} по предмету {subject_id} на {notification_time}")
+                logger.warning(f"Запланировано уведомление для группы {group_id} по предмету {subject_id} на {notification_time}")
 
-            attendance_collection_time = class_datetime + timedelta(minutes=10)
+            attendance_collection_time = class_datetime + timedelta(minutes=5)
             if attendance_collection_time > now:
                 scheduler.add_job(
                     collect_attendance_job,
                     trigger=DateTrigger(run_date=attendance_collection_time),
                     args=[application, group_id, subject_id, start_time]
                 )
-                logger.info(f"Запланирован сбор посещаемости для группы {group_id} по предмету {subject_id} на {attendance_collection_time}")
+                logger.warning(f"Запланирован сбор посещаемости для группы {group_id} по предмету {subject_id} на {attendance_collection_time}")
 
     except Exception as e:
         logger.error(f"Ошибка в schedule_daily_notifications: {e}", exc_info=True)
@@ -496,12 +535,14 @@ async def send_class_notification_job(application, group_id, subject_id, start_t
         cursor.execute("SELECT telegram_id, id FROM students WHERE group_id = %s", (group_id,))
         students = cursor.fetchall()
 
+        # Get class representative and deputy
         cursor.execute("SELECT telegram_id FROM class_representatives WHERE group_id = %s", (group_id,))
         starosta_result = cursor.fetchone()
-        if starosta_result:
-            starosta_telegram_id = starosta_result[0]
-        else:
-            starosta_telegram_id = None
+        cursor.execute("SELECT telegram_id FROM deputy_class_representatives WHERE group_id = %s", (group_id,))
+        deputy_result = cursor.fetchone()
+
+        starosta_telegram_id = starosta_result[0] if starosta_result else None
+        deputy_telegram_id = deputy_result[0] if deputy_result else None
 
         class_type_ru = {
             'lecture': 'Лекция',
@@ -516,32 +557,42 @@ async def send_class_notification_job(application, group_id, subject_id, start_t
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             try:
-                await application.bot.send_message(
+                message = await application.bot.send_message(
                     chat_id=telegram_id,
                     text=f'Напоминание о начале пары "{subject_name}" ({class_type_ru}) в {start_time.strftime("%H:%M")}.\n'
                          f'Пожалуйста, отметьте свое присутствие.',
                     reply_markup=reply_markup
                 )
-                logger.info(f"Отправлено уведомление пользователю {telegram_id}")
+                # Store message ID to delete later
+                context = application.bot_data.setdefault('attendance_messages', {})
+                context[telegram_id] = message.message_id
+                logger.warning(f"Отправлено уведомление пользователю {telegram_id}")
             except Exception as e:
                 logger.error(f"Ошибка при отправке сообщения пользователю {telegram_id}: {e}", exc_info=True)
 
             class_datetime = datetime.combine(datetime.now().date(), start_time)
-            cursor.execute("""
-                INSERT INTO temp_attendance (student_id, subject_id, class_time)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (student_id, subject_id, class_time) DO NOTHING
-            """, (student_id, subject_id, class_datetime))
-
-        if starosta_telegram_id:
             try:
-                await application.bot.send_message(
-                    chat_id=starosta_telegram_id,
-                    text=f'Напоминание о начале пары "{subject_name}" ({class_type_ru}) в {start_time.strftime("%H:%M")}.',
-                )
-                logger.info(f"Отправлено уведомление старосте {starosta_telegram_id}")
+                cursor.execute("""
+                    INSERT INTO temp_attendance (student_id, subject_id, class_time)
+                    VALUES (%s, %s, %s)
+                """, (student_id, subject_id, class_datetime))
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
             except Exception as e:
-                logger.error(f"Ошибка при отправке сообщения старосте {starosta_telegram_id}: {e}", exc_info=True)
+                conn.rollback()
+                logger.error(f"Ошибка при вставке в temp_attendance: {e}", exc_info=True)
+
+        # Notify class representative and deputy
+        for rep_id in [starosta_telegram_id, deputy_telegram_id]:
+            if rep_id:
+                try:
+                    await application.bot.send_message(
+                        chat_id=rep_id,
+                        text=f'Напоминание о начале пары "{subject_name}" ({class_type_ru}) в {start_time.strftime("%H:%M")}.',
+                    )
+                    logger.warning(f"Отправлено уведомление старосте/заместителю {rep_id}")
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке сообщения старосте/заместителю {rep_id}: {e}", exc_info=True)
 
         conn.commit()
 
@@ -552,6 +603,7 @@ async def send_class_notification_job(application, group_id, subject_id, start_t
             cursor.close()
         if conn:
             release_connection(conn)
+
 async def collect_attendance_job(application, group_id, subject_id, start_time):
     try:
         conn = get_connection()
@@ -559,41 +611,56 @@ async def collect_attendance_job(application, group_id, subject_id, start_time):
         now = datetime.now()
         class_time = datetime.combine(now.date(), start_time)
 
+        # Get class representative and deputy
         cursor.execute("SELECT telegram_id FROM class_representatives WHERE group_id = %s", (group_id,))
-        result = cursor.fetchone()
-        if result:
-            starosta_id = result[0]
+        starosta_result = cursor.fetchone()
+        cursor.execute("SELECT telegram_id FROM deputy_class_representatives WHERE group_id = %s", (group_id,))
+        deputy_result = cursor.fetchone()
+
+        reps = []
+        if starosta_result:
+            reps.append(starosta_result[0])
+        if deputy_result:
+            reps.append(deputy_result[0])
+
+        if reps:
             cursor.execute("""
                 SELECT ta.student_id, s.first_name, s.last_name, ta.status
                 FROM temp_attendance ta
                 JOIN students s ON ta.student_id = s.id
                 WHERE ta.subject_id = %s AND ta.class_time = %s AND s.group_id = %s
+                ORDER BY s.last_name, s.first_name
             """, (subject_id, class_time, group_id))
             attendance_records = cursor.fetchall()
 
-            for student_id, first_name, last_name, status in attendance_records:
-                status_text = {
-                    None: 'Не ответил',
-                    'present': 'Будет присутствовать',
-                    'absent': 'Отсутствует'
-                }.get(status, 'Неизвестно')
+            for rep_id in reps:
+                # Build the attendance list
+                attendance_text = 'Список посещаемости:\n'
+                for idx, (student_id, first_name, last_name, status) in enumerate(attendance_records):
+                    status_text = {
+                        None: 'Не ответил',
+                        'present': 'Будет присутствовать',
+                        'absent': 'Отсутствует'
+                    }.get(status, 'Неизвестно')
+                    attendance_text += f"{idx+1}. {first_name} {last_name} - {status_text}\n"
 
+                # Send message with options to modify each student's status
                 keyboard = [
-                    [
-                        InlineKeyboardButton("✅ Присутствует", callback_data=f'confirm_present_{student_id}_{subject_id}_{class_time.timestamp()}'),
-                        InlineKeyboardButton("❌ Отсутствует", callback_data=f'confirm_absent_{student_id}_{subject_id}_{class_time.timestamp()}')
-                    ]
+                    [InlineKeyboardButton(f"Изменить статус {idx+1}", callback_data=f'edit_{idx}_{subject_id}_{class_time.timestamp()}')]
+                    for idx in range(len(attendance_records))
                 ]
+                keyboard.append([InlineKeyboardButton("✅ Подтвердить и отправить", callback_data=f'confirm_all_{subject_id}_{class_time.timestamp()}')])
                 reply_markup = InlineKeyboardMarkup(keyboard)
+
                 try:
                     await application.bot.send_message(
-                        chat_id=starosta_id,
-                        text=f"Студент: {first_name} {last_name}\nСтатус: {status_text}",
+                        chat_id=rep_id,
+                        text=attendance_text,
                         reply_markup=reply_markup
                     )
-                    logger.info(f"Отправлено сообщение старосте {starosta_id} о студенте {student_id}")
+                    logger.warning(f"Отправлен список посещаемости старосте/заместителю {rep_id}")
                 except Exception as e:
-                    logger.error(f"Ошибка при отправке сообщения старосте {starosta_id}: {e}", exc_info=True)
+                    logger.error(f"Ошибка при отправке сообщения старосте/заместителю {rep_id}: {e}", exc_info=True)
 
         conn.commit()
 
@@ -617,7 +684,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         subject_id = int(subject_id)
         student_id = int(student_id)
         status = 'present' if action == 'present' else 'absent'
-        await query.answer('Ваш статус записан.')
+        await query.answer('Спасибо за ваш ответ.')
+        await query.message.delete()
         conn = get_connection()
         try:
             cursor = conn.cursor()
@@ -647,28 +715,118 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['subject_id'] = subject_id
             context.user_data['student_id'] = student_id
             await context.bot.send_message(chat_id=telegram_id, text='Введите причину отсутствия.')
-    elif parts[0] == 'confirm':
-        action, status_action, student_id, subject_id, class_time_ts = parts
-        student_id = int(student_id)
-        subject_id = int(subject_id)
-        class_time = datetime.fromtimestamp(float(class_time_ts))
-        status = 'present' if status_action == 'present' else 'absent'
-        await query.answer('Статус студента обновлен.')
+    elif parts[0] == 'edit':
+        idx, subject_id, class_time_ts = int(parts[1]), int(parts[2]), float(parts[3])
+        class_time = datetime.fromtimestamp(class_time_ts)
+
+        context.user_data['edit_idx'] = idx
+        context.user_data['subject_id'] = subject_id
+        context.user_data['class_time'] = class_time
+        context.user_data['telegram_id'] = telegram_id
+
+        # Fetch student info
         conn = get_connection()
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO attendance_journal (student_id, subject_id, date, status)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (student_id, subject_id, date) DO UPDATE SET status = EXCLUDED.status
-            """, (student_id, subject_id, class_time.date(), status))
-            conn.commit()
+                SELECT ta.student_id, s.first_name, s.last_name, ta.status
+                FROM temp_attendance ta
+                JOIN students s ON ta.student_id = s.id
+                WHERE ta.subject_id = %s AND ta.class_time = %s
+                ORDER BY s.last_name, s.first_name
+            """, (subject_id, class_time))
+            attendance_records = cursor.fetchall()
+            if idx < 0 or idx >= len(attendance_records):
+                await query.answer('Неверный индекс.')
+                return
+            student_id, first_name, last_name, status = attendance_records[idx]
+            status_text = {
+                None: 'Не ответил',
+                'present': 'Будет присутствовать',
+                'absent': 'Отсутствует'
+            }.get(status, 'Неизвестно')
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Присутствует", callback_data=f'change_present_{student_id}_{subject_id}_{class_time_ts}'),
+                    InlineKeyboardButton("❌ Отсутствует", callback_data=f'change_absent_{student_id}_{subject_id}_{class_time_ts}')
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                text=f"Студент: {first_name} {last_name}\nТекущий статус: {status_text}",
+                reply_markup=reply_markup
+            )
         except Exception as e:
-            logger.error(f"Ошибка в button_callback (confirm): {e}", exc_info=True)
+            logger.error(f"Ошибка при редактировании статуса: {e}", exc_info=True)
+            await query.answer('Произошла ошибка.')
+        finally:
+            cursor.close()
+            release_connection(conn)
+
+    elif parts[0] == 'change':
+        status_action, student_id, subject_id, class_time_ts = parts[1], int(parts[2]), int(parts[3]), float(parts[4])
+        class_time = datetime.fromtimestamp(class_time_ts)
+        status = 'present' if status_action == 'present' else 'absent'
+
+        conn = get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE temp_attendance
+                SET status = %s
+                WHERE student_id = %s AND subject_id = %s AND class_time = %s
+            """, (status, student_id, subject_id, class_time))
+            conn.commit()
+            await query.answer('Статус обновлен.')
+            # Optionally, you can re-display the attendance list here
+            await query.message.delete()
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса: {e}", exc_info=True)
             await query.answer('Произошла ошибка при обновлении статуса.')
         finally:
             cursor.close()
             release_connection(conn)
+
+    elif parts[0] == 'confirm':
+        if parts[1] == 'all':
+            subject_id, class_time_ts = int(parts[2]), float(parts[3])
+            class_time = datetime.fromtimestamp(class_time_ts)
+
+            conn = get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT student_id, status FROM temp_attendance
+                    WHERE subject_id = %s AND class_time = %s
+                """, (subject_id, class_time))
+                records = cursor.fetchall()
+                for student_id, status in records:
+                    if status:
+                        try:
+                            cursor.execute("""
+                                INSERT INTO attendance_journal (student_id, subject_id, date, status)
+                                VALUES (%s, %s, %s, %s)
+                            """, (student_id, subject_id, class_time.date(), status))
+                        except psycopg2.errors.UniqueViolation:
+                            conn.rollback()
+                            cursor.execute("""
+                                UPDATE attendance_journal SET status=%s
+                                WHERE student_id=%s AND subject_id=%s AND date=%s
+                            """, (status, student_id, subject_id, class_time.date()))
+                conn.commit()
+                await query.answer('Посещаемость сохранена.')
+                await query.edit_message_text('Посещаемость успешно сохранена.')
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении посещаемости: {e}", exc_info=True)
+                await query.answer('Произошла ошибка при сохранении посещаемости.')
+            finally:
+                cursor.close()
+                release_connection(conn)
+    else:
+        # Handle other callback data
+        pass
 
 async def handle_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_explanation'):
@@ -692,6 +850,7 @@ async def handle_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             cursor.close()
             release_connection(conn)
         context.user_data['awaiting_explanation'] = False
+
 def is_class_representative():
     def decorator(func):
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -701,14 +860,18 @@ def is_class_representative():
                 cursor = conn.cursor()
                 cursor.execute("SELECT group_id FROM class_representatives WHERE telegram_id = %s", (telegram_id,))
                 result = cursor.fetchone()
+                if result:
+                    context.user_data['group_id'] = result[0]
+                    return await func(update, context, *args, **kwargs)
+                cursor.execute("SELECT group_id FROM deputy_class_representatives WHERE telegram_id = %s", (telegram_id,))
+                result = cursor.fetchone()
+                if result:
+                    context.user_data['group_id'] = result[0]
+                    return await func(update, context, *args, **kwargs)
             finally:
                 cursor.close()
                 release_connection(conn)
-            if result:
-                context.user_data['group_id'] = result[0]
-                return await func(update, context, *args, **kwargs)
-            else:
-                await update.message.reply_text('У вас нет прав для выполнения этой команды.')
+            await update.message.reply_text('У вас нет прав для выполнения этой команды.')
         return wrapper
     return decorator
 
@@ -831,8 +994,8 @@ async def enter_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return SELECT_STUDENT
     try:
         grade = int(text)
-        if grade < 0 or grade > 100:
-            await update.message.reply_text('Пожалуйста, введите оценку от 0 до 100 или нажмите "Назад".')
+        if grade < 2 or grade > 5:
+            await update.message.reply_text('Пожалуйста, введите оценку от 2 до 5 или нажмите "Назад".')
             return ENTER_GRADE
         student_id = context.user_data['selected_student_id']
         subject_id = context.user_data['subjects'][context.user_data['current_subject_index']]['id']
@@ -840,13 +1003,20 @@ async def enter_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO attestations (student_id, subject_id, grade)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (student_id, subject_id) DO UPDATE SET grade = EXCLUDED.grade
-            """, (student_id, subject_id, grade))
+            try:
+                cursor.execute("""
+                    INSERT INTO attestations (student_id, subject_id, grade)
+                    VALUES (%s, %s, %s)
+                """, (student_id, subject_id, grade))
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                cursor.execute("""
+                    UPDATE attestations SET grade=%s
+                    WHERE student_id=%s AND subject_id=%s
+                """, (grade, student_id, subject_id))
             conn.commit()
         except Exception as e:
+            conn.rollback()
             logger.error(f"Ошибка в enter_grade: {e}", exc_info=True)
             await update.message.reply_text('Произошла ошибка при сохранении оценки.')
             return ENTER_GRADE
@@ -867,6 +1037,7 @@ async def enter_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text('Пожалуйста, введите корректное числовое значение оценки или нажмите "Назад".')
         return ENTER_GRADE
+
 @is_class_representative()
 async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Введите сообщение для рассылки:')
@@ -917,16 +1088,23 @@ async def handle_assign_representative(update: Update, context: ContextTypes.DEF
                 result = cursor.fetchone()
                 if result:
                     group_id = result[0]
-                    cursor.execute("""
-                        INSERT INTO class_representatives (telegram_id, group_id)
-                        VALUES (%s, %s)
-                        ON CONFLICT (telegram_id) DO UPDATE SET group_id = EXCLUDED.group_id
-                    """, (telegram_id, group_id))
+                    try:
+                        cursor.execute("""
+                            INSERT INTO class_representatives (telegram_id, group_id)
+                            VALUES (%s, %s)
+                        """, (telegram_id, group_id))
+                    except psycopg2.errors.UniqueViolation:
+                        conn.rollback()
+                        cursor.execute("""
+                            UPDATE class_representatives SET group_id=%s
+                            WHERE telegram_id=%s
+                        """, (group_id, telegram_id))
                     conn.commit()
                     await update.message.reply_text('Пользователь назначен старостой группы.', reply_markup=get_user_menu(update.message.from_user.id))
                 else:
                     await update.message.reply_text('Студент с таким Telegram ID не найден.')
             except Exception as e:
+                conn.rollback()
                 logger.error(f"Ошибка в handle_assign_representative: {e}", exc_info=True)
                 await update.message.reply_text('Произошла ошибка при назначении старосты.')
             finally:
@@ -935,6 +1113,50 @@ async def handle_assign_representative(update: Update, context: ContextTypes.DEF
         except ValueError:
             await update.message.reply_text('Пожалуйста, введите корректный Telegram ID.')
         context.user_data['awaiting_representative_id'] = False
+        return ConversationHandler.END
+
+@is_class_representative()
+async def assign_deputy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Введите Telegram ID пользователя для назначения заместителем старосты:')
+    context.user_data['awaiting_deputy_id'] = True
+    return ASSIGN_DEPUTY
+
+async def handle_assign_deputy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('awaiting_deputy_id'):
+        try:
+            telegram_id = int(update.message.text)
+            group_id = context.user_data['group_id']
+            conn = get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM students WHERE telegram_id = %s AND group_id = %s", (telegram_id, group_id))
+                result = cursor.fetchone()
+                if result:
+                    try:
+                        cursor.execute("""
+                            INSERT INTO deputy_class_representatives (telegram_id, group_id)
+                            VALUES (%s, %s)
+                        """, (telegram_id, group_id))
+                    except psycopg2.errors.UniqueViolation:
+                        conn.rollback()
+                        cursor.execute("""
+                            UPDATE deputy_class_representatives SET group_id=%s
+                            WHERE telegram_id=%s
+                        """, (group_id, telegram_id))
+                    conn.commit()
+                    await update.message.reply_text('Пользователь назначен заместителем старосты группы.', reply_markup=get_user_menu(update.message.from_user.id))
+                else:
+                    await update.message.reply_text('Студент с таким Telegram ID не найден в вашей группе.')
+            except Exception as e:
+                conn.rollback()
+                logger.error(f"Ошибка в handle_assign_deputy: {e}", exc_info=True)
+                await update.message.reply_text('Произошла ошибка при назначении заместителя старосты.')
+            finally:
+                cursor.close()
+                release_connection(conn)
+        except ValueError:
+            await update.message.reply_text('Пожалуйста, введите корректный Telegram ID.')
+        context.user_data['awaiting_deputy_id'] = False
         return ConversationHandler.END
 
 @is_admin()
@@ -988,7 +1210,7 @@ async def perform_backup_and_send(application, chat_id):
                     document=file,
                     caption="Резервная копия базы данных."
                 )
-                logger.info(f'Резервная копия успешно создана и отправлена администратору {chat_id}.')
+                logger.warning(f'Резервная копия успешно создана и отправлена администратору {chat_id}.')
         except Exception as e:
             logger.error(f"Ошибка при отправке файла: {e}", exc_info=True)
     except subprocess.CalledProcessError as e:
@@ -998,9 +1220,10 @@ async def perform_backup_and_send(application, chat_id):
             os.remove(backup_file)
 
 async def automatic_backup_database(application):
-    logger.info("Запуск автоматического резервного копирования базы данных.")
+    logger.warning("Запуск автоматического резервного копирования базы данных.")
     for admin_id in ADMIN_IDS:
         await perform_backup_and_send(application, admin_id)
+
 @is_admin()
 async def export_data_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = get_connection()
@@ -1103,6 +1326,7 @@ async def export_table_data(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     finally:
         cursor.close()
         release_connection(conn)
+
 def schedule_jobs(application):
     global scheduler
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
@@ -1177,6 +1401,15 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     application.add_handler(assign_representative_conv_handler)
+
+    assign_deputy_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex('^👥 Назначить заместителя$'), assign_deputy)],
+        states={
+            ASSIGN_DEPUTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_assign_deputy)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    application.add_handler(assign_deputy_conv_handler)
 
     application.add_handler(CallbackQueryHandler(button_callback))
 
